@@ -26,6 +26,9 @@ ticket_logs/
 # 환경 변수 파일
 .env
 .env.*
+.env
+*.pyc
+__pycache__
 
 # Jupyter Notebook 체크포인트
 .ipynb_checkpoints/
@@ -38,3 +41,4 @@ ticket_logs/
 
 # 기타
 .DS_Store
+이주원/token.env
