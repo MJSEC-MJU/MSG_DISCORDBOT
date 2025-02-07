@@ -8,12 +8,12 @@ import json
 from dotenv import load_dotenv
 import pytz
 
-#.env파일 내용
 load_dotenv()
-DISCORD_CHANNEL_ID = os.getenv("DISCORD_CHANNEL_ID")
-DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-DISCORD_SERVER_ID = os.getenv("DISCORD_SERVER_ID")
-API_URL = os.getenv("API_URL")
+
+DISCORD_BOT_TOKEN = str(os.getenv("DISCORD_BOT_TOKEN"))
+DISCORD_CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID"))
+DISCORD_SERVER_ID = int(os.getenv("DISCORD_SERVER_ID"))
+API_URL = str(os.getenv("API_URL"))
 
 bot = commands.Bot(command_prefix='/',intents=discord.Intents.all()) #명령어
 
@@ -24,26 +24,23 @@ WINNER_FILE = "winner.json"
 #이모지별 대학교
 user_role = ""
 ROLE_EMOJI_DIC={"\U00000031\U000020E3":"명지대학교",
-                "\U00000032\U000020E3":"00대학교",
-                "\U00000033\U000020E3":"01대학교"}
+                "\U00000032\U000020E3":"세종대학교",
+                "\U00000033\U000020E3":"건국대학교"}
 
-#json 파일 열기
 def load_winners():
     if os.path.exists(WINNER_FILE):
         with open(WINNER_FILE, "r",encoding="utf-8") as f:
             return json.load(f)
     return {}
 
-#json 파일 저장
 def save_winners(winners):
     with open(WINNER_FILE, "w",encoding="utf-8") as f:
         json.dump(winners, f, ensure_ascii=False, indent=4)
 
-WINNER_DIC = load_winners()
+WINNER_DIC= load_winners()
 
 #동시 실행 방지
 lock = asyncio.Lock()
-
 
 #봇 시작 알림
 @bot.event
@@ -55,7 +52,7 @@ async def on_ready():
             await guild.create_role(name=role_name)
     channel = bot.get_channel(DISCORD_CHANNEL_ID)
     if channel is None:
-        await channel.send('NO CHANNEL')
+        print('NO CHANNEL')
         return
     await channel.send('CONNECTED')
 
@@ -94,7 +91,7 @@ async def on_message(message):
             except discord.HTTPException as e:
                 print("ERROR")
 
-bot.command()#/대회시작 (시간) (대회 회차)(시간 만큼 타이머 진행)
+bot.command()#/대회시작 (시간) (대회 회차)(시간 만큼 타이머 진행행)
 async def 대회시작(ctx, hours: int, n:int):
     if not isinstance(hours,int) or hours <=0:
         await ctx.send("올바른 시간을 입력해 주세요")
@@ -102,7 +99,7 @@ async def 대회시작(ctx, hours: int, n:int):
     if not isinstance(n,int) or n <=0:
         await ctx.send("올바른 대회 회차를 입력해 주세요")
         return
-    await ctx.send(f"⏰ **{hours}시간 후 제 {n}회 대회가 종료 됩니다!!**")
+    await ctx.send(f"⏰ **{hours}시간 후 제 {n}회 대회가 종료 됩니다!**")
     async def announce_winner():
         await asyncio.sleep(hours * 3600) #초로 변경
         try:
