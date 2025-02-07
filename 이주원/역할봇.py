@@ -8,6 +8,7 @@ import json
 from dotenv import load_dotenv
 import pytz
 
+#.env파일 내용
 load_dotenv()
 DISCORD_CHANNEL_ID = os.getenv("DISCORD_CHANNEL_ID")
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
@@ -26,14 +27,14 @@ ROLE_EMOJI_DIC={"\U00000031\U000020E3":"명지대학교",
                 "\U00000032\U000020E3":"00대학교",
                 "\U00000033\U000020E3":"01대학교"}
 
-#json 파일 열기기
+#json 파일 열기
 def load_winners():
     if os.path.exists(WINNER_FILE):
         with open(WINNER_FILE, "r",encoding="utf-8") as f:
             return json.load(f)
     return {}
 
-#json 파일 저장장
+#json 파일 저장
 def save_winners(winners):
     with open(WINNER_FILE, "w",encoding="utf-8") as f:
         json.dump(winners, f, ensure_ascii=False, indent=4)
@@ -42,6 +43,7 @@ WINNER_DIC = load_winners()
 
 #동시 실행 방지
 lock = asyncio.Lock()
+
 
 #봇 시작 알림
 @bot.event
@@ -92,7 +94,7 @@ async def on_message(message):
             except discord.HTTPException as e:
                 print("ERROR")
 
-bot.command()#/대회시작 (시간) (대회 회차)(시간 만큼 타이머 진행행)
+bot.command()#/대회시작 (시간) (대회 회차)(시간 만큼 타이머 진행)
 async def 대회시작(ctx, hours: int, n:int):
     if not isinstance(hours,int) or hours <=0:
         await ctx.send("올바른 시간을 입력해 주세요")
@@ -114,7 +116,7 @@ async def 대회시작(ctx, hours: int, n:int):
                     score = result.get("score","알수없음")
                     school = result.get("school","알수없음")
                     
-                    embed = discord.Embed(title=f"🏆 **{n}회 대회 우승자자 발표** 🏆",description="대회의 결과 입니다.",color=0x00ff00)
+                    embed = discord.Embed(title=f"🏆 **{n}회 대회 우승자 발표** 🏆",description="대회의 결과 입니다.",color=0x00ff00)
                     embed.add_field(name="순위", value=f"{rank}등",inline =True)
                     embed.add_field(name="이름",value=f"{name}",inline=True)
                     embed.add_field(name="점수",value=f"{score}점",inline=True)
