@@ -1,66 +1,82 @@
-import discord
-from discord.ext import commands
-from discord.ui import Button, View, Modal, TextInput
-import yt_dlp
-import re
 from yt_token import Token
+import re
+import yt_dlp
+from discord.ui import Button, View, Modal, TextInput
+from discord.ext import commands
+import discord
+import asyncio
 
 intents = discord.Intents.default()
-intents.message_content = True  # 메시지 내용에 대한 권한 활성화
+intents.message_content = True
+intents.guilds = True
+intents.voice_states = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# 유튜브 URL 검증 양식
+# 유튜브 URL 검증 정규식
 YOUTUBE_URL_REGEX = re.compile(
-    r"(https?://)?(www\.)?(youtube\.com|youtu\.?be)/.+"  # URL 검증 정규식
+    r"(https?://)?(www\.)?(youtube\.com|youtu\.?be)/.+"
 )
 
-# 플레이리스트
-queue = []
+queue = []  # 노래 대기열
+current_song = None  # 현재 재생 중인 노래 정보
 
 
-# 노래 재생 버튼을 클릭했을 때 실행될 함수
-async def play_song(interaction, url):
+async def mute_all_members(guild, channel):
+    """모든 멤버 음소거"""
+    for member in channel.members:
+        if not member.bot:
+            try:
+                await member.edit(mute=True)
+            except Exception as e:
+                print(f"❌ {member.display_name} 음소거 실패: {e}")
+
+
+async def unmute_all_members(guild, channel):
+    """모든 멤버 음소거 해제"""
+    for member in channel.members:
+        if not member.bot:
+            try:
+                await member.edit(mute=False)
+            except Exception as e:
+                print(f"❌ {member.display_name} 음소거 해제 실패: {e}")
+
+
+async def play_next_song(ctx):
+    """큐에서 다음 노래를 가져와 재생"""
+    global current_song
+
+    if not queue:
+        await ctx.send("🎵 대기열에 노래가 없습니다.")
+        return
+
+    song = queue.pop(0)
+    current_song = song
+
     try:
-        # 응답을 지연 처리하지 않음, 한 번만 응답
-        await interaction.response.send_message(f"✅ 노래가 재생됩니다: {url}")
-
-    except Exception as e:
-        await interaction.response.send_message(f"❌ 오류 발생: {str(e)}", ephemeral=True)
-
-
-class MusicButtons(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="🎵 노래 추가", style=discord.ButtonStyle.green)
-    async def add_song(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(MusicModal())
-
-    @discord.ui.button(label="📜 플레이리스트 보기", style=discord.ButtonStyle.blurple)
-    async def show_playlist(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not queue:
-            await interaction.response.send_message("🎶 현재 대기 중인 노래가 없습니다.", ephemeral=True)
+        voice_client = ctx.voice_client
+        if not voice_client or not voice_client.is_connected():
             return
 
-        playlist = "\n".join(
-            [f"{idx+1}. {song['title']}" for idx, song in enumerate(queue)]).strip()
-        await interaction.response.send_message(f"🎼 **현재 플레이리스트:**\n{playlist}", ephemeral=True)
+        ydl_opts = {
+            "format": "bestaudio/best",
+            "quiet": True
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(song["url"], download=False)
+            url = info["url"]
 
-    @discord.ui.button(label="⏹ 노래 중단", style=discord.ButtonStyle.red)
-    async def stop_song(self, interaction: discord.Interaction, button: discord.ui.Button):
-        queue.clear()
-        if interaction.guild.voice_client:
-            await interaction.guild.voice_client.disconnect()
-        await interaction.response.send_message("⏹ 음악이 중지되었습니다.", ephemeral=True)
+        ffmpeg_options = {
+            "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
+            "options": "-vn"
+        }
+        voice_client.play(discord.FFmpegPCMAudio(url, **ffmpeg_options),
+                          after=lambda e: asyncio.run_coroutine_threadsafe(play_next_song(ctx), bot.loop))
 
-    @discord.ui.button(label="🎶 노래 재생", style=discord.ButtonStyle.green)
-    async def play_song_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if queue:
-            song = queue.pop(0)
-            await play_song(interaction, song["url"])  # 첫 번째 노래부터 재생
-        else:
-            await interaction.response.send_message("🎶 대기열에 노래가 없습니다.", ephemeral=True)
+        await ctx.send(f"🎶 **재생 중:** {song['title']}")
+
+    except Exception as e:
+        await ctx.send(f"❌ 오류 발생: {str(e)}")
 
 
 class MusicModal(discord.ui.Modal, title="노래 추가"):
@@ -68,7 +84,7 @@ class MusicModal(discord.ui.Modal, title="노래 추가"):
         label="YouTube URL 입력", placeholder="https://www.youtube.com/watch?v=...")
 
     async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer()  # 응답을 지연 처리
+        await interaction.response.defer()
 
         url = self.url.value.strip()
         if not YOUTUBE_URL_REGEX.match(url):
@@ -86,20 +102,66 @@ class MusicModal(discord.ui.Modal, title="노래 추가"):
             await interaction.followup.send(f"❌ 오류 발생: {str(e)}", ephemeral=True)
 
 
+class MusicButtons(discord.ui.View):
+    def __init__(self, ctx):
+        super().__init__(timeout=None)
+        self.ctx = ctx
+
+    @discord.ui.button(label="🎵 노래 추가", style=discord.ButtonStyle.green)
+    async def add_song(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(MusicModal())
+
+    @discord.ui.button(label="📜 플레이리스트 보기", style=discord.ButtonStyle.blurple)
+    async def show_playlist(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not queue:
+            await interaction.response.send_message("🎶 현재 대기 중인 노래가 없습니다.", ephemeral=True)
+            return
+
+        playlist = "\n".join(
+            [f"{idx+1}. {song['title']}" for idx, song in enumerate(queue)]).strip()
+        await interaction.response.send_message(f"🎼 **현재 플레이리스트:**\n{playlist}", ephemeral=True)
+
+    @discord.ui.button(label="🎶 노래 재생", style=discord.ButtonStyle.green)
+    async def play_song_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()  # 응답을 지연시켜 NotFound 예외 방지
+
+        if interaction.guild.voice_client and interaction.guild.voice_client.is_playing():
+            await interaction.followup.send("🔊 이미 노래가 재생 중입니다.", ephemeral=True)
+            return
+
+        if queue:
+            await play_next_song(self.ctx)  # 올바르게 노래 재생 함수 호출
+            await interaction.followup.send("🎶 노래를 재생합니다!", ephemeral=True)
+        else:
+            await interaction.followup.send("🎶 대기열이 비어 있습니다.", ephemeral=True)
+
+    @discord.ui.button(label="⏭ 노래 건너뛰기", style=discord.ButtonStyle.blurple)
+    async def skip_song(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.guild.voice_client and interaction.guild.voice_client.is_playing():
+            interaction.guild.voice_client.stop()
+            await interaction.response.send_message("⏭ 노래를 건너뛰었습니다.", ephemeral=True)
+        else:
+            await interaction.response.send_message("⏭ 현재 재생 중인 노래가 없습니다.", ephemeral=True)
+
+    @discord.ui.button(label="🛑 노래 중단", style=discord.ButtonStyle.red)
+    async def stop_song(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """현재 재생 중인 노래를 중단하고 큐를 초기화"""
+        if interaction.guild.voice_client and interaction.guild.voice_client.is_playing():
+            interaction.guild.voice_client.stop()
+            queue.clear()
+            await interaction.response.send_message("🛑 노래를 중단하고 대기열을 초기화했습니다.", ephemeral=True)
+        else:
+            await interaction.response.send_message("🛑 현재 재생 중인 노래가 없습니다.", ephemeral=True)
+
+
 @bot.command(name="음악패널")
 async def music_panel(ctx):
-    await ctx.send("🎶 **음악 컨트롤 패널**", view=MusicButtons())
-
-
-@bot.event
-async def on_ready():
-    print(f"✅ {bot.user} 봇이 실행 중!")
-    await bot.change_presence(status=discord.Status.online, activity=None)
+    await ctx.send("🎶 **음악 컨트롤 패널**", view=MusicButtons(ctx))
 
 
 @bot.command()
 async def 입장(ctx):
-    """봇을 음성 채널에 입장"""
+    """봇을 음성 채널에 입장하고 모든 사용자를 음소거"""
     if ctx.author.voice:
         channel = ctx.author.voice.channel
         if ctx.voice_client:
@@ -108,22 +170,28 @@ async def 입장(ctx):
             await channel.connect()
             await ctx.send(f"✅ {channel.name} 채널에 입장했습니다.")
 
-        # 입장 후 모달을 띄워서 선택할 수 있도록
-        view = MusicButtons()  # 음성 채널에 입장한 후 음악 패널을 제공하는 버튼
-        await ctx.send("🎶 **음악 컨트롤 패널**을 선택하세요.", view=view)
-
+        await mute_all_members(ctx.guild, channel)
+        await ctx.send("🎶 **음악 컨트롤 패널**을 선택하세요.", view=MusicButtons(ctx))
     else:
         await ctx.send("❌ 먼저 음성 채널에 들어가세요.")
 
 
 @bot.command()
 async def 나가(ctx):
-    """봇을 음성 채널에서 퇴장"""
+    """봇을 음성 채널에서 퇴장하고 모든 사용자의 음소거를 해제"""
     if ctx.voice_client:
+        channel = ctx.voice_client.channel
+        await unmute_all_members(ctx.guild, channel)  # 음소거 해제
         await ctx.voice_client.disconnect()
         queue.clear()
-        await ctx.send("👋 음성 채널에서 나갔습니다.")
+        await ctx.send("👋 음성 채널에서 나갔습니다. (모든 사용자 음소거 해제)")
     else:
         await ctx.send("❌ 현재 음성 채널에 연결되어 있지 않습니다.")
+
+
+@bot.event
+async def on_ready():
+    print(f"✅ {bot.user} 봇이 실행 중!")
+    await bot.change_presence(status=discord.Status.online, activity=None)
 
 bot.run(Token)
