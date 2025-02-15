@@ -5,6 +5,7 @@ import os
 import asyncio
 import requests
 import json
+import aiohttp
 from dotenv import load_dotenv
 import pytz
 
@@ -100,34 +101,54 @@ async def 대회시작(ctx, hours: int, n:int):
         await ctx.send("올바른 대회 회차를 입력해 주세요")
         return
     await ctx.send(f"⏰ **{hours}시간 후 제 {n}회 대회가 종료 됩니다!**")
-    async def announce_winner():
-        await asyncio.sleep(hours * 3600) #초로 변경
+    
+    async def fetch_data():
+        async with aiohttp.ClientSession() as session:
+            async with session.get(API_URL) as response:
+                if response.status == 200:
+                    return await response.json()
+                return None
+
+    async def announce_winner(ctx):
+        """대회 우승자 발표"""
+        await asyncio.sleep(hours * 3600)  # 초 단위 변경경
+
         try:
-            response = requests.get(API_URL)
-            if response.status_code == 200:
-                data = response.json()
-                if data.get("status") == 200:
-                    result = data.get("result",{})
-                    rank = result.get("rank","알수없음")
-                    name = result.get("name","알수없음")
-                    score = result.get("score","알수없음")
-                    school = result.get("school","알수없음")
-                    
-                    embed = discord.Embed(title=f"🏆 **{n}회 대회 우승자 발표** 🏆",description="대회의 결과 입니다.",color=0x00ff00)
-                    embed.add_field(name="순위", value=f"{rank}등",inline =True)
-                    embed.add_field(name="이름",value=f"{name}",inline=True)
-                    embed.add_field(name="점수",value=f"{score}점",inline=True)
-                    embed.add_field(name="학교",value=f"{school}",inline=True)
+            data = await fetch_data()  # API 데이터 가져오기
+            if data and "data" in data:
+                results = data["data"]
+
+                # 1위 데이터 가져오기
+                if results:
+                    winner = results[0]
+                    rank = 1
+                    name = winner["userid"]
+                    score = winner["totalPoint"]
+                    school = winner["univ"] if winner["univ"] else "N/A"
+
+                    # 임베드 생성
+                    embed = discord.Embed(
+                        title=f"🏆 **{n}회 대회 우승자 발표** 🏆",
+                        description="대회의 결과입니다.",
+                        color=0x00ff00
+                    )
+                    embed.add_field(name="순위", value=f"{rank}등", inline=True)
+                    embed.add_field(name="이름", value=name, inline=True)
+                    embed.add_field(name="점수", value=f"{score}점", inline=True)
+                    embed.add_field(name="학교", value=school, inline=True)
                     embed.set_footer(text=f"대회 종료 시간: {datetime.datetime.now(pytz.timezone('Asia/Seoul')).strftime('%Y-%m-%d %H:%M:%S')}")
+
+                    # 우승자 저장
                     WINNER_DIC[name] = n
-                    save_winners(WINNER_DIC)
-                    await ctx.send(embed=embed)
+                    save_winners(WINNER_DIC)  # 우승자 저장 함수 호출
+
+                    await ctx.send(embed=embed)  # 디스코드 채널에 메시지 전송
                 else:
-                    await ctx.send("API 응답오류")
+                    await ctx.send("대회 결과가 없습니다.")
             else:
-                await ctx.send("API 연결 실패")
+                await ctx.send("API 응답이 올바르지 않습니다.")
         except Exception as e:
-            await ctx.send(f"오류발생: {str(e)}")
+            await ctx.send(f"오류 발생: {str(e)}")
     asyncio.create_task(announce_winner())
 
 @bot.event#역할지급
