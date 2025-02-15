@@ -27,12 +27,17 @@ async def fetch_data():
     async with aiohttp.ClientSession() as session:
         async with session.get(API_URL) as response:
             if response.status == 200:
-                return await response.json()
-            return None
+                data = await response.json()
+                print("API 응답 데이터:", data)  # 디버깅용 로그 추가
+                return data
+            else:
+                print(f"API 요청 실패: {response.status}")
+                return None
 
 # 대회 우승자 발표 함수
 async def announce_winner(ctx, hours, n):
-    await asyncio.sleep(hours * 3600)  # 지정한 시간 후 실행
+    #await asyncio.sleep(hours * 3600)  # 지정한 시간 후 실행
+    print("TIME OUT")
 
     try:
         data = await fetch_data()
