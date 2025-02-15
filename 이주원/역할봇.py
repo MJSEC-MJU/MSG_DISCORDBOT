@@ -40,12 +40,16 @@ async def announce_winner(ctx, hours, n):
     print("TIME OUT")
 
     try:
+        print("[1]함수시작")
         data = await fetch_data()
+        print("[2]데이터 패치 완료")
         if data and "data" in data:
             results = data["data"]
+            print(data)
 
             # 1위 데이터 가져오기
             if results:
+                print("[3]데이터 리스트화 완료")
                 winner = results[0]
                 rank = 1
                 name = winner["userid"]
@@ -65,8 +69,8 @@ async def announce_winner(ctx, hours, n):
 
                 WINNER_DIC[name] = n
                 save_winners(WINNER_DIC)
-
-                await ctx.send(embed=embed)
+                channel = bot.get_channel(DISCORD_CHANNEL_ID)  # 채널 직접 호출
+                await channel.send(embed=embed)
             else:
                 await ctx.send("대회 결과가 없습니다.")
         else:
