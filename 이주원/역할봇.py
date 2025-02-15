@@ -25,8 +25,20 @@ intents.members = True
 bot = commands.Bot(command_prefix='/',intents=intents) #명령어
 
 WINNER_FILE = "winner.json"
+WINNER_DIC = {}
+def load_winners():
+    if os.path.exists(WINNER_FILE):
+        with open(WINNER_FILE, "r",encoding="utf-8") as f:
+            return json.load(f)
+    return {}
 
-# 비동기 API 요청 함수
+def save_winners(winners):
+    with open(WINNER_FILE, "w",encoding="utf-8") as f:
+        json.dump(winners, f, ensure_ascii=False, indent=4)
+
+WINNER_DIC= load_winners()
+
+# API요청
 async def fetch_data():
     async with sse_client.EventSource(API_URL) as event_source:
         async for event in event_source:
@@ -38,9 +50,7 @@ async def fetch_data():
             return data
 # 대회 우승자 발표 함수
 async def announce_winner(ctx, hours, n):
-    #await asyncio.sleep(hours * 3600)  # 지정한 시간 후 실행
-    print("TIME OUT")
-
+    await asyncio.sleep(hours * 3600)  # 지정한 시간 후 실행
     try:
         data = await fetch_data()
         # API 응답 형식에 따라 results 할당
@@ -85,18 +95,6 @@ user_role = ""
 ROLE_EMOJI_DIC={"\U00000031\U000020E3":"명지대학교",
                 "\U00000032\U000020E3":"세종대학교",
                 "\U00000033\U000020E3":"건국대학교"}
-
-def load_winners():
-    if os.path.exists(WINNER_FILE):
-        with open(WINNER_FILE, "r",encoding="utf-8") as f:
-            return json.load(f)
-    return {}
-
-def save_winners(winners):
-    with open(WINNER_FILE, "w",encoding="utf-8") as f:
-        json.dump(winners, f, ensure_ascii=False, indent=4)
-
-WINNER_DIC= load_winners()
 
 #동시 실행 방지
 lock = asyncio.Lock()
