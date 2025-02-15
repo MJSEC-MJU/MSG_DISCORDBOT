@@ -16,7 +16,9 @@ DISCORD_CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID"))
 DISCORD_SERVER_ID = int(os.getenv("DISCORD_SERVER_ID"))
 API_URL = str(os.getenv("API_URL"))
 
-bot = commands.Bot(command_prefix='/',intents=discord.Intents.all()) #명령어
+intents = discord.Intents.default()
+intents.message_content = True
+bot = commands.Bot(command_prefix='/',intents=intents) #명령어
 
 WINNER_FILE = "winner.json"
 
@@ -137,15 +139,22 @@ async def on_message(message):
             except discord.HTTPException as e:
                 print("ERROR")
 
+    await bot.process_commands(message)
+
 @bot.command()#/대회시작 (시간) (대회 회차) / (시간 만큼 타이머 진행)
 async def 대회시작(ctx, hours: int, n:int):
-    if not isinstance(hours,int) or hours <=0:
-        await ctx.send("올바른 시간을 입력해 주세요")
-        return
-    if not isinstance(n,int) or n <=0:
-        await ctx.send("올바른 대회 회차를 입력해 주세요")
-        return
-    await ctx.send(f"⏰ **{hours}시간 후 제 {n}회 대회가 종료 됩니다!**")
+    try:
+        if not isinstance(hours,int) or hours <=0:
+            await ctx.send("올바른 시간을 입력해 주세요")
+            return
+        if not isinstance(n,int) or n <=0:
+            await ctx.send("올바른 대회 회차를 입력해 주세요")
+            return
+        await ctx.send(f"⏰ **{hours}시간 후 제 {n}회 대회가 종료 됩니다!**")
+        await announce_winner(ctx, hours, n)
+
+    except commands.BadArgument:
+        await ctx.send("⚠ **숫자를 올바르게 입력해 주세요! (예: `/대회시작 2 1`)**")
 
 @bot.event#역할지급
 async def on_raw_reaction_add(payload):
