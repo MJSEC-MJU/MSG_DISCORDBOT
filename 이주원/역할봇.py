@@ -142,7 +142,7 @@ async def on_message(message):
     await bot.process_commands(message)
 
 @bot.command()#/대회시작 (시간) (대회 회차) / (시간 만큼 타이머 진행)
-async def 대회시작(ctx, hours: int, n:int):
+async def 대회시작(ctx, hours: float, n:int):
     try:
         if not isinstance(hours,int) or hours <=0:
             await ctx.send("올바른 시간을 입력해 주세요")
