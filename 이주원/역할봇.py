@@ -5,7 +5,6 @@ import os
 import asyncio
 import json
 from dotenv import load_dotenv
-import pytz
 from aiohttp_sse_client import client as sse_client
 
 load_dotenv()
@@ -13,11 +12,8 @@ load_dotenv()
 DISCORD_BOT_TOKEN = str(os.getenv("DISCORD_BOT_TOKEN"))
 DISCORD_CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID"))
 DISCORD_SERVER_ID = int(os.getenv("DISCORD_SERVER_ID"))
+CHALANGE_DISCORD_CHANNEL_ID = int(os.getenv("CHALANGE_DISCORD_CHANNEL_ID"))
 API_URL = os.getenv("API_URL")
-try:
-    DISCORD_CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID"))
-except (ValueError, TypeError):
-    DISCORD_CHANNEL_ID = None
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -48,9 +44,10 @@ async def fetch_data():
                 print("JSON 파싱 실패:", e)
                 data = event.data
             return data
+        
 # 대회 우승자 발표 함수
-async def announce_winner(ctx, hours, n):
-    await asyncio.sleep(hours * 3600)  # 지정한 시간 후 실행
+async def announce_winner(ctx, wait_time, n):
+    await asyncio.sleep(wait_time)  # 지정한 시간 후 실행
     try:
         data = await fetch_data()
         # API 응답 형식에 따라 results 할당
@@ -85,10 +82,40 @@ async def announce_winner(ctx, hours, n):
             save_winners(WINNER_DIC)
             channel = bot.get_channel(DISCORD_CHANNEL_ID)
             await channel.send(embed=embed)
+            await close_channel(ctx)
         else:
             await ctx.send("대회 결과가 없습니다.")
     except Exception as e:
         await ctx.send(f"오류 발생: {str(e)}")
+
+async def schedule_open_channel(ctx, delay: float,n): #open time
+    """지정된 delay(초) 후에 채널을 오픈하는 함수"""
+    await asyncio.sleep(delay)
+    await open_channel(ctx,n)
+    channel = ctx.guild.get_channel(CHALANGE_DISCORD_CHANNEL_ID)
+    if channel:
+        await ctx.send(f"{channel.mention} 채널이 열렸습니다.")
+
+async def open_channel(ctx,n): #channel open
+    channel_id = CHALANGE_DISCORD_CHANNEL_ID
+    channel = ctx.guild.get_channel(channel_id)
+    if not channel:
+        await ctx.send("NO CHANNEL")
+        return
+    overwrite = channel.overwrites_for(ctx.guild.default_role)
+    overwrite.view_channel = True
+    await channel.set_permissions(ctx.guild.default_role,overwrite=overwrite)
+    await channel.send(f":loudspeaker: **지금 부터 제{n}회 대회를 시작합니다!**:loudspeaker: ")
+
+async def close_channel(ctx): #channel close
+    channel_id = CHALANGE_DISCORD_CHANNEL_ID
+    channel = ctx.guild.get_channel(channel_id)
+    if not channel:
+        await ctx.send("NO CHANNEL")
+        return
+    overwrite = channel.overwrites_for(ctx.guild.default_role)
+    overwrite.view_channel = False
+    await channel.set_permissions(ctx.guild.default_role,overwrite=overwrite)
 
 #이모지별 대학교
 user_role = ""
@@ -113,20 +140,34 @@ async def on_ready():
         return
     await channel.send('CONNECTED')
 
-@bot.command()#/대회시작 (시간) (대회 회차) / (시간 만큼 타이머 진행)
-async def 대회시작(ctx, hours: float, n:int):
-    try:
-        if not isinstance(hours,float) or hours <=0:
-            await ctx.send("올바른 시간을 입력해 주세요")
-            return
-        if not isinstance(n,int) or n <=0:
-            await ctx.send("올바른 대회 회차를 입력해 주세요")
-            return
-        await ctx.send(f"⏰ **{hours}시간 후 제 {n}회 대회가 종료 됩니다!**")
-        await announce_winner(ctx, hours, n)
+@bot.command() #/대회시작 (시간) (대회 회차) / (시간 만큼 타이머 진행)
+async def 대회시작(ctx, start:int, end:int, n:int):
+    tz = pytz.timezone("Asia/Seoul")
+    now = datetime.datetime.now(tz)
+    # 오늘 날짜 기준으로 시작/종료 datetime 생성
+    start_dt = now.replace(hour=start, minute=0, second=0, microsecond=0)
+    end_dt = now.replace(hour=end, minute=0, second=0, microsecond=0)
+    
+    # 만약 종료 시간이 시작 시간보다 작거나 같다면(예: 23시 ~ 1시), 종료 시간을 다음날로 간주
+    if end <= start:
+        end_dt += datetime.timedelta(days=1)
+    
+    contest_duration = (end_dt - start_dt).total_seconds() / 3600  # 시간 단위
+    wait_time = (end_dt - now).total_seconds()  # 지금부터 종료까지 남은 시간(초)
+    open_wait_time = (start_dt - now).total_seconds()
+    
+    if wait_time <= 0:
+        await ctx.send("이미 대회가 종료된 시간입니다.")
+        return
 
-    except commands.BadArgument:
-        await ctx.send("⚠ **숫자를 올바르게 입력해 주세요! (예: `/대회시작 2 1`)**")
+    if open_wait_time < 0:
+        open_wait_time = 0
+
+    bot.loop.create_task(schedule_open_channel(ctx,open_wait_time,n))
+
+    await ctx.send(f"⏰ **{start}시부터 {end}시까지 {contest_duration:.1f}시간동안 제 {n}회 대회를 진행합니다!**")
+    # 별도의 태스크로 우승자 발표 함수를 실행 (대회 종료 시간까지 기다림)
+    bot.loop.create_task(announce_winner(ctx, wait_time, n))
 
 @bot.command()
 async def 우승자(ctx):
@@ -147,7 +188,7 @@ async def 공지(ctx):
         notice = ctx.content[4:]
         channel = bot.get_channel(DISCORD_CHANNEL_ID)
         embed = discord.Embed(title="***[역할 선택]***",description="학교에 맞는 이모지를 선택 해주시기 바랍니다\n――――――――――――――――――――――――――――\n\n{}\n\n――――――――――――――――――――――――――――".format(notice),color=0x00ff00)
-        embed.set_footer(text="TITLE | 담당관리자:".format(ctx.author))
+        embed.set_footer(text="TITLE | 담당관리자:{}".format(ctx.author))
         await channel.send("@everyone", embed=embed)
     if i is False:
         await ctx.channel.send("{}, 당신은 관리자가 아닙니다.".format(ctx.author))
