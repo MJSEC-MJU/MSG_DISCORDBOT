@@ -171,6 +171,7 @@ async def 대회시작(ctx, start:int, end:int, n:int):
 
 @bot.command()
 async def 우승자(ctx):
+    print("우승자 명령어 실행됨")
     if len(WINNER_DIC) == 0:
         await ctx.send("우승자가 없습니다!")
         return
