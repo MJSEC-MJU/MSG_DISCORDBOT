@@ -183,12 +183,12 @@ async def 우승자(ctx):
     await ctx.channel.send (embed=embed)
 
 @bot.command()
-async def 공지(ctx):
+async def 공지(ctx, *,notice):
     i = (ctx.author.guild_permissions.send_messages)
     if i is True:
-        notice = ctx.content[4:]
+        notice = ctx.message.content[4:]
         channel = bot.get_channel(DISCORD_CHANNEL_ID)
-        embed = discord.Embed(title="***[역할 선택]***",description="학교에 맞는 이모지를 선택 해주시기 바랍니다\n――――――――――――――――――――――――――――\n\n{}\n\n――――――――――――――――――――――――――――".format(notice),color=0x00ff00)
+        embed = discord.Embed(title="***[공지]***",description="공지 입니다!\n――――――――――――――――――――――――――――\n\n{}\n\n――――――――――――――――――――――――――――".format(notice),color=0x00ff00)
         embed.set_footer(text="TITLE | 담당관리자:{}".format(ctx.author))
         await channel.send("@everyone", embed=embed)
     if i is False:
