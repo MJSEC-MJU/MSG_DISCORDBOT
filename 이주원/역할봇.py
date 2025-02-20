@@ -78,7 +78,7 @@ async def announce_winner(ctx, wait_time, n):
             embed.add_field(name="학교", value=school, inline=True)
             embed.set_footer(text=f"대회 종료 시간: {datetime.datetime.now(pytz.timezone('Asia/Seoul')).strftime('%Y-%m-%d %H:%M:%S')}")
 
-            WINNER_DIC[name] = n
+            WINNER_DIC[n] = name
             save_winners(WINNER_DIC)
             channel = bot.get_channel(DISCORD_CHANNEL_ID)
             await channel.send(embed=embed)
@@ -171,12 +171,11 @@ async def 대회시작(ctx, start:int, end:int, n:int):
 
 @bot.command()
 async def 우승자(ctx):
-    print("우승자 명령어 실행됨")
     if len(WINNER_DIC) == 0:
         await ctx.send("우승자가 없습니다!")
         return
     embed = discord.Embed(title="코딩 대회 우승자", timestamp=datetime.datetime.now(pytz.timezone('UTC')),color=0x00ff00)
-    for name,n in WINNER_DIC.items(): 
+    for n,name in WINNER_DIC.items(): 
         embed.add_field(name=f"{name}",value=f":trophy: 제 {n}회 우승자",inline=False)
     embed.set_thumbnail(url="https://tecoble.techcourse.co.kr/static/348a6c1ea3a4fa8b6990e3e3bf4e8490/20435/sample2.png")
     channel = bot.get_channel(DISCORD_CHANNEL_ID)
