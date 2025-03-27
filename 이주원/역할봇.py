@@ -68,7 +68,7 @@ async def announce_winner(ctx, wait_time, n):
             school = winner["univ"] if winner["univ"] else "N/A"
 
             embed = discord.Embed(
-                title=f"🏆 **{n}회 대회 우승자 발표** 🏆",
+                title=f"🏆 **{n}회 MSG CTF 우승자 발표** 🏆",
                 description="대회의 결과입니다.",
                 color=0x00ff00
             )
@@ -105,7 +105,7 @@ async def open_channel(ctx,n): #channel open
     overwrite = channel.overwrites_for(ctx.guild.default_role)
     overwrite.view_channel = True
     await channel.set_permissions(ctx.guild.default_role,overwrite=overwrite)
-    await channel.send(f":loudspeaker: **지금 부터 제{n}회 대회를 시작합니다!**:loudspeaker: ")
+    await channel.send(f":loudspeaker: **지금 부터 제{n}회 MSG CTF 대회를 시작합니다!**:loudspeaker: ")
 
 async def close_channel(ctx): #channel close
     channel_id = CHALANGE_DISCORD_CHANNEL_ID
@@ -174,7 +174,7 @@ async def 우승자(ctx):
     if len(WINNER_DIC) == 0:
         await ctx.send("우승자가 없습니다!")
         return
-    embed = discord.Embed(title="코딩 대회 우승자", timestamp=datetime.datetime.now(pytz.timezone('UTC')),color=0x00ff00)
+    embed = discord.Embed(title="MSG CTF 대회 우승자", timestamp=datetime.datetime.now(pytz.timezone('UTC')),color=0x00ff00)
     for n,name in WINNER_DIC.items(): 
         embed.add_field(name=f"{name}",value=f":trophy: 제 {n}회 우승자",inline=False)
     embed.set_thumbnail(url="https://tecoble.techcourse.co.kr/static/348a6c1ea3a4fa8b6990e3e3bf4e8490/20435/sample2.png")
@@ -186,7 +186,7 @@ async def 공지(ctx, *,notice):
     i = (ctx.author.guild_permissions.send_messages)
     if i is True:
         notice = ctx.message.content[4:]
-        channel = bot.get_channel(DISCORD_CHANNEL_ID)
+        channel = bot.get_channel(CHALANGE_DISCORD_CHANNEL_ID)
         embed = discord.Embed(title="***[공지]***",description="공지 입니다!\n――――――――――――――――――――――――――――\n\n{}\n\n――――――――――――――――――――――――――――".format(notice),color=0x00ff00)
         embed.set_footer(text="TITLE | 담당관리자:{}".format(ctx.author))
         await channel.send("@everyone", embed=embed)
