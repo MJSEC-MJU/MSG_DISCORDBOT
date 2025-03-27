@@ -63,7 +63,7 @@ async def announce_winner(ctx, wait_time, n):
         if results:
             winner = results[0]
             rank = 1
-            name = winner["userid"]
+            name = winner["userId"]
             score = winner["totalPoint"]
             school = winner["univ"] if winner["univ"] else "N/A"
 
