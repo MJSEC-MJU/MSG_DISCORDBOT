@@ -1,4 +1,4 @@
-# TiketBot.py — contest-time API + leaderboard SSE(팀 랭킹) + 자동 리스케줄 (상태 전이 시에만 공지)
+# TiketBot.py — contest-time API + leaderboard SSE(Top3) + 자동 리스케줄 + 시작/종료 1회 공지(중복 방지)
 import os
 import json
 import asyncio
@@ -17,9 +17,7 @@ DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN") or ""
 DISCORD_CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID") or 0)                # 알림 채널
 DISCORD_SERVER_ID = int(os.getenv("DISCORD_SERVER_ID") or 0)
 CHALANGE_DISCORD_CHANNEL_ID = int(os.getenv("CHALANGE_DISCORD_CHANNEL_ID") or 0)  # 대회 채널(개폐)
-# 리더보드 SSE (기본: 팀 랭킹 스트림)
-API_URL = os.getenv("API_URL") or "https://msgctf.kr/api/leaderboard/stream"
-# 대회 시간 API
+API_URL = os.getenv("API_URL") or "https://msgctf.kr/api/leaderboard/stream"      # 팀 랭킹 SSE
 CONTEST_TIME_URL = os.getenv("CONTEST_TIME_URL") or "https://msgctf.kr/api/contest-time"
 DEFAULT_ROUND = int(os.getenv("CONTEST_ROUND") or 0)  # 회차 기본값(선택)
 
@@ -55,11 +53,12 @@ ROLE_EMOJI_DIC = {
 
 # ====== 동시 실행 방지 락 ======
 lock = asyncio.Lock()
+announce_lock = asyncio.Lock()  # 시작/종료 공지 중복 방지 용
 
 # ====== 유틸 ======
 def parse_server_time(s: str) -> datetime.datetime:
     """'YYYY-MM-DD HH:mm[:ss]' → KST aware datetime"""
-    if len(s) == 16:  # 'YYYY-MM-DD HH:mm'
+    if len(s) == 16:
         s += ":00"
     dt_naive = datetime.datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
     return KST.localize(dt_naive)
@@ -78,9 +77,7 @@ async def http_get_json(url: str):
         return None
 
 async def fetch_contest_time():
-    """
-    {startTime, endTime, currentTime} → (start_at, end_at, now_at)
-    """
+    """{startTime, endTime, currentTime} → (start_at, end_at, now_at)"""
     data = await http_get_json(CONTEST_TIME_URL)
     if not data:
         return None
@@ -97,37 +94,37 @@ async def fetch_contest_time():
 def seconds_until(a: datetime.datetime, b: datetime.datetime) -> float:
     return (b - a).total_seconds()
 
-async def ensure_channel_open(guild: discord.Guild, n: int | None = None):
-    channel = guild.get_channel(CHALANGE_DISCORD_CHANNEL_ID)
-    if not channel:
+def round_text(n: int | None) -> str:
+    return f"{n}회" if n else (f"{DEFAULT_ROUND}회" if DEFAULT_ROUND else "대회")
+
+async def channel_by_pref(guild: discord.Guild):
+    return guild.get_channel(CHALANGE_DISCORD_CHANNEL_ID) or guild.get_channel(DISCORD_CHANNEL_ID)
+
+async def ensure_channel_open(guild: discord.Guild):
+    ch = guild.get_channel(CHALANGE_DISCORD_CHANNEL_ID)
+    if not ch:
         print("[channel] 대회 채널 없음")
         return
-    overwrite = channel.overwrites_for(guild.default_role)
+    overwrite = ch.overwrites_for(guild.default_role)
     if overwrite.view_channel is True:
         return
     overwrite.view_channel = True
-    await channel.set_permissions(guild.default_role, overwrite=overwrite)
-    if n:
-        await channel.send(f":loudspeaker: **지금부터 제{n}회 MSG CTF 대회를 시작합니다!** :loudspeaker:")
+    await ch.set_permissions(guild.default_role, overwrite=overwrite)
 
 async def ensure_channel_closed(guild: discord.Guild):
-    channel = guild.get_channel(CHALANGE_DISCORD_CHANNEL_ID)
-    if not channel:
+    ch = guild.get_channel(CHALANGE_DISCORD_CHANNEL_ID)
+    if not ch:
         print("[channel] 대회 채널 없음")
         return
-    overwrite = channel.overwrites_for(guild.default_role)
+    overwrite = ch.overwrites_for(guild.default_role)
     if overwrite.view_channel is False:
         return
     overwrite.view_channel = False
-    await channel.set_permissions(guild.default_role, overwrite=overwrite)
+    await ch.set_permissions(guild.default_role, overwrite=overwrite)
 
-# ====== 리더보드 SSE 파싱 ======
+# ====== 리더보드 SSE ======
 async def fetch_data_from_sse():
-    """
-    리더보드 SSE에서 첫 유효 데이터(팀 배열)를 1회 수신
-    - 서버가 'data:[{...}]'처럼 보내도 처리
-    - 일부 클라이언트는 'event.data'에 JSON만 주므로 둘 다 지원
-    """
+    """리더보드 SSE에서 첫 유효 데이터(팀 배열) 1회 수신"""
     if not API_URL:
         return None
     try:
@@ -136,70 +133,92 @@ async def fetch_data_from_sse():
                 payload = event.data
                 if not payload:
                     continue
-                # 원본 라인이 'data:[{...}]'로 오는 경우 제거
                 if isinstance(payload, str) and payload.startswith("data:"):
                     payload = payload.split("data:", 1)[1].strip()
                 try:
                     data = json.loads(payload)
                 except Exception:
-                    # keepalive 등 비-JSON 라인 무시
                     continue
-
-                # 표준 팀 랭킹 배열
                 if isinstance(data, list) and data:
                     return data
-                # { "data": [...] } 래핑 형태도 허용
                 if isinstance(data, dict) and isinstance(data.get("data"), list):
                     return data["data"]
     except Exception as e:
         print(f"[SSE] 수신 에러: {e}")
         return None
 
-def pick_top_team(entries: list[dict]) -> dict | None:
-    """
-    rank가 있으면 rank 오름차순, 없으면 totalPoint 내림차순으로 1위 선별
-    """
+def top_n(entries: list[dict], n: int = 3) -> list[dict]:
     if not entries:
-        return None
+        return []
     try:
         ranked = sorted(entries, key=lambda x: (x.get("rank", 10**9), -x.get("totalPoint", 0)))
-        return ranked[0]
     except Exception:
-        return entries[0]
+        ranked = entries
+    return ranked[:n]
+
+async def send_start_announcement(guild: discord.Guild, n: int | None, end_at: datetime.datetime):
+    ch = await channel_by_pref(guild)
+    if not ch:
+        return
+    rt = round_text(n)
+    embed = discord.Embed(
+        title=f"🚀 **{rt} MSG CTF 시작!**",
+        description="모든 참가자 여러분, 행운을 빕니다!",
+        color=0x00ff00
+    )
+    embed.add_field(name="종료 시간", value=end_at.astimezone(KST).strftime("%Y-%m-%d %H:%M:%S"), inline=False)
+    await ch.send("@everyone", embed=embed)
 
 async def post_winner_embed(guild: discord.Guild, n: int | None, when: datetime.datetime):
-    """
-    우승자 임베드 전송(팀 랭킹 기준) + 채널 닫기
-    """
+    """우승 공지: 팀 랭킹 상위 3팀 공지 → 채널 닫기"""
     teams = await fetch_data_from_sse()
-    ch = guild.get_channel(CHALANGE_DISCORD_CHANNEL_ID) or guild.get_channel(DISCORD_CHANNEL_ID)
+    ch = await channel_by_pref(guild)
 
     if teams and ch:
-        winner = pick_top_team(teams) or {}
-        team_name = winner.get("teamName", "N/A")
-        score = winner.get("totalPoint", 0)
-        solved = winner.get("solvedCount", 0)
-        rank = winner.get("rank", 1)
-
-        round_text = f"{n}회" if n else (f"{DEFAULT_ROUND}회" if DEFAULT_ROUND else "대회")
+        tops = top_n(teams, 3)
+        rt = round_text(n)
         embed = discord.Embed(
-            title=f"🏆 **{round_text} MSG CTF 우승 팀 발표** 🏆",
-            description="대회의 결과입니다.",
+            title=f"🏆 **{rt} MSG CTF 최종 결과 (TOP 3)**",
             color=0x00ff00,
         )
-        embed.add_field(name="순위", value=f"{rank}등", inline=True)
-        embed.add_field(name="팀", value=team_name, inline=True)
-        embed.add_field(name="점수", value=f"{score:,}점", inline=True)
-        embed.add_field(name="푼 문제", value=f"{solved}개", inline=True)
+        lines = []
+        for t in tops:
+            r = t.get("rank")
+            name = t.get("teamName", "N/A")
+            pts = t.get("totalPoint", 0)
+            solved = t.get("solvedCount", 0)
+            lines.append(f"**{r}등** — {name}  ·  {pts:,}점  ·  {solved}문제")
+        embed.description = "\n".join(lines) if lines else "결과를 불러오지 못했습니다."
         embed.set_footer(text=f"대회 종료 시간: {when.astimezone(KST).strftime('%Y-%m-%d %H:%M:%S')}")
 
-        if n:
-            WINNER_DIC[str(n)] = team_name
+        if n and tops:
+            WINNER_DIC[str(n)] = tops[0].get("teamName", "N/A")
             save_winners(WINNER_DIC)
 
         await ch.send(embed=embed)
 
     await ensure_channel_closed(guild)
+
+# ====== 중복 방지용 원샷 헬퍼 ======
+def iso_key(dt: datetime.datetime) -> str:
+    return dt.astimezone(KST).strftime("%Y-%m-%d %H:%M:%S")
+
+async def announce_start_once(guild: discord.Guild, n: int | None, start_at: datetime.datetime, end_at: datetime.datetime):
+    key = f"START|{iso_key(start_at)}"
+    async with announce_lock:
+        if schedule.start_key == key:
+            return
+        schedule.start_key = key
+    await ensure_channel_open(guild)
+    await send_start_announcement(guild, n, end_at)
+
+async def announce_end_once(guild: discord.Guild, n: int | None, end_at: datetime.datetime):
+    key = f"END|{iso_key(end_at)}"
+    async with announce_lock:
+        if schedule.end_key == key:
+            return
+        schedule.end_key = key
+    await post_winner_embed(guild, n, end_at)
 
 # ====== 스케줄 상태 ======
 class ScheduleState:
@@ -209,31 +228,27 @@ class ScheduleState:
         self.round_no: int | None = None
         self.open_task: asyncio.Task | None = None
         self.announce_task: asyncio.Task | None = None
-        # 중복 공지 방지용
-        self.state: str | None = None          # 'BEFORE' | 'RUNNING' | 'ENDED'
-        self.announced: bool = False           # 우승자 공지 1회만
-
+        # 중복 방지 키(유니크 시간 단위)
+        self.start_key: str | None = None
+        self.end_key: str | None = None
     def cancel_all(self):
         for t in (self.open_task, self.announce_task):
             if t and not t.done():
                 t.cancel()
         self.open_task = None
         self.announce_task = None
-        self.announced = False
-        self.state = None
+        # 시간 변경되면 새 키를 사용해야 하므로 리셋
+        self.start_key = None
+        self.end_key = None
 
 schedule = ScheduleState()
 
-async def schedule_from_api(
-    guild: discord.Guild,
-    round_no: int | None = None,
-    notify_channel_id: int | None = None,
-    silent: bool = False,
-):
+async def schedule_from_api(guild: discord.Guild, round_no: int | None = None, notify_channel_id: int | None = None):
     """
-    contest-time API를 읽어 현재/시작/종료 기준으로 자동 스케줄링.
-    - 값이 변경되면 기존 예약 취소 후 재예약.
-    - 채팅 공지는 silent=False 이고 (시간 변경 or 상태 전이)일 때만 보냄.
+    contest-time API 기반 자동 스케줄링.
+    - 시작 전: 채널 오픈 + 시작 공지 예약(1회)
+    - 진행 중: 즉시 오픈 + 시작 공지(1회)
+    - 종료 시: TOP3 공지(1회) + 닫기
     """
     info = await fetch_contest_time()
     if not info:
@@ -248,122 +263,75 @@ async def schedule_from_api(
         schedule.cancel_all()
         schedule.start_at, schedule.end_at = start_at, end_at
 
-    # 현재 상태 계산
-    if now_at >= end_at:
-        new_state = "ENDED"
-    elif now_at < start_at:
-        new_state = "BEFORE"
-    else:
-        new_state = "RUNNING"
+    guild_channel = guild.get_channel(notify_channel_id or DISCORD_CHANNEL_ID)
+    now = now_at
 
-    should_notify = (not silent) and (changed or schedule.state != new_state)
-    guild_channel = guild.get_channel(notify_channel_id) if notify_channel_id else None
+    # 이미 종료됨 → 즉시 종료 공지(원샷)
+    if now >= end_at:
+        await announce_end_once(guild, schedule.round_no, end_at)
+        if changed and guild_channel:
+            await guild_channel.send(f"대회가 이미 종료되었습니다. (종료: {end_at.strftime('%Y-%m-%d %H:%M:%S')})")
+        return
 
-    # --- 상태별 처리 ---
-    if new_state == "ENDED":
-        if not schedule.announced:
-            await ensure_channel_closed(guild)
-            await post_winner_embed(guild, schedule.round_no, end_at)
-            schedule.announced = True
+    # 시작 전
+    if now < start_at:
+        open_delay = max(0.0, seconds_until(now, start_at))
+        async def do_open():
+            await asyncio.sleep(open_delay)
+            await announce_start_once(guild, schedule.round_no, start_at, end_at)
+        schedule.open_task = asyncio.create_task(do_open())
 
-        if should_notify and guild_channel:
-            await guild_channel.send(
-                f"대회가 종료되었습니다. (종료: {end_at.strftime('%Y-%m-%d %H:%M:%S')})"
-            )
+        announce_delay = max(0.0, seconds_until(now, end_at))
+        async def do_announce():
+            await asyncio.sleep(announce_delay)
+            await announce_end_once(guild, schedule.round_no, end_at)
+        schedule.announce_task = asyncio.create_task(do_announce())
 
-    elif new_state == "BEFORE":
-        if changed:
-            open_delay = max(0.0, seconds_until(now_at, start_at))
-            async def do_open():
-                await asyncio.sleep(open_delay)
-                await ensure_channel_open(guild, schedule.round_no)
-            schedule.open_task = asyncio.create_task(do_open())
-
-            announce_delay = max(0.0, seconds_until(now_at, end_at))
-            async def do_announce():
-                await asyncio.sleep(announce_delay)
-                await post_winner_embed(guild, schedule.round_no, end_at)
-                schedule.announced = True
-            schedule.announce_task = asyncio.create_task(do_announce())
-
-        if should_notify and guild_channel:
-            open_in = int(max(0, seconds_until(now_at, start_at)))
-            end_in = int(max(0, seconds_until(now_at, end_at)))
+        if changed and guild_channel:
             await guild_channel.send(
                 "🗓 대회 일정 동기화 완료\n"
-                f" - 시작: {start_at.strftime('%Y-%m-%d %H:%M:%S')} (in {open_in}s)\n"
-                f" - 종료: {end_at.strftime('%Y-%m-%d %H:%M:%S')} (in {end_in}s)"
+                f" - 시작: {start_at.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                f" - 종료: {end_at.strftime('%Y-%m-%d %H:%M:%S')}"
             )
+        return
 
-    else:  # RUNNING
-        await ensure_channel_open(guild, schedule.round_no)
+    # 진행 중
+    if start_at <= now < end_at:
+        # 즉시 시작 공지(원샷)
+        await announce_start_once(guild, schedule.round_no, start_at, end_at)
 
-        if changed:
-            announce_delay = max(0.0, seconds_until(now_at, end_at))
-            async def do_announce():
-                await asyncio.sleep(announce_delay)
-                await post_winner_embed(guild, schedule.round_no, end_at)
-                schedule.announced = True
-            schedule.announce_task = asyncio.create_task(do_announce())
+        announce_delay = max(0.0, seconds_until(now, end_at))
+        async def do_announce():
+            await asyncio.sleep(announce_delay)
+            await announce_end_once(guild, schedule.round_no, end_at)
+        schedule.announce_task = asyncio.create_task(do_announce())
 
-        if should_notify and guild_channel:
-            left_in = int(max(0, seconds_until(now_at, end_at)))
+        if changed and guild_channel:
             await guild_channel.send(
                 "⏱ 대회가 진행 중으로 감지되어 채널을 열어두었습니다.\n"
-                f" - 종료: {end_at.strftime('%Y-%m-%d %H:%M:%S')} (in {left_in}s)"
+                f" - 종료: {end_at.strftime('%Y-%m-%d %H:%M:%S')}"
             )
-
-    # 상태 갱신
-    schedule.state = new_state
 
 # ====== 백그라운드 감시(변경 자동 반영) ======
 @tasks.loop(seconds=60)
 async def watch_contest_time():
-    """60초마다 contest-time을 확인해서 변경 시 재스케줄(조용히 동기화)"""
+    """60초마다 contest-time을 확인해서 변경 시 재스케줄"""
     try:
         guild = bot.get_guild(DISCORD_SERVER_ID)
         if guild is None:
             return
-        await schedule_from_api(guild, schedule.round_no, notify_channel_id=None, silent=True)
+        await schedule_from_api(guild, schedule.round_no)
     except Exception as e:
         print(f"[watch] 에러: {e}")
 
-# ====== 기존 수동 명령(유지, 팀 랭킹으로 수정) ======
-async def announce_winner(ctx, wait_time, n):
+# ====== 수동 명령(Top3 + 동일 원샷 경로 사용) ======
+async def announce_winner(ctx, wait_time, n, end_dt):
     await asyncio.sleep(wait_time)
-    try:
-        teams = await fetch_data_from_sse()
-        if teams:
-            winner = pick_top_team(teams) or {}
-            team_name = winner.get("teamName", "N/A")
-            score = winner.get("totalPoint", 0)
-            solved = winner.get("solvedCount", 0)
-            embed = discord.Embed(
-                title=f"🏆 **{n}회 MSG CTF 우승 팀 발표** 🏆",
-                description="대회의 결과입니다.",
-                color=0x00ff00
-            )
-            embed.add_field(name="순위", value=f"{winner.get('rank', 1)}등", inline=True)
-            embed.add_field(name="팀", value=team_name, inline=True)
-            embed.add_field(name="점수", value=f"{score:,}점", inline=True)
-            embed.add_field(name="푼 문제", value=f"{solved}개", inline=True)
-            embed.set_footer(text=f"대회 종료 시간: {datetime.datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')}")
-            WINNER_DIC[str(n)] = team_name
-            save_winners(WINNER_DIC)
-            channel = bot.get_channel(CHALANGE_DISCORD_CHANNEL_ID)
-            await channel.send(embed=embed)
-            await ensure_channel_closed(ctx.guild)
-        else:
-            await ctx.send("대회 결과가 없습니다.")
-    except Exception as e:
-        await ctx.send(f"오류 발생: {str(e)}")
+    await announce_end_once(ctx.guild, n, end_dt)
 
-async def schedule_open_channel(ctx, delay: float, n: int):
+async def schedule_open_channel(ctx, delay: float, n: int, start_dt: datetime.datetime, end_dt: datetime.datetime):
     await asyncio.sleep(delay)
-    await ensure_channel_open(ctx.guild, n)
-    channel = ctx.guild.get_channel(CHALANGE_DISCORD_CHANNEL_ID)
-    if channel:
-        await ctx.send(f"{channel.mention} 채널이 열렸습니다.")
+    await announce_start_once(ctx.guild, n, start_dt, end_dt)
 
 # ====== 이벤트/명령어 ======
 @bot.event
@@ -378,13 +346,13 @@ async def on_ready():
                     await guild.create_role(name=role_name)
                 except Exception:
                     pass
-    channel = bot.get_channel(DISCORD_CHANNEL_ID)
-    if channel:
-        await channel.send('CONNECTED')
+    ch = bot.get_channel(DISCORD_CHANNEL_ID)
+    if ch:
+        await ch.send('CONNECTED')
 
-    # 시작 시 한번 동기화(공지 O) + 감시 루프 시작(공지 X)
+    # 시작 시 동기화 + 감시 루프 시작
     if guild:
-        await schedule_from_api(guild, DEFAULT_ROUND, DISCORD_CHANNEL_ID, silent=False)
+        await schedule_from_api(guild, DEFAULT_ROUND, DISCORD_CHANNEL_ID)
         if not watch_contest_time.is_running():
             watch_contest_time.start()
 
@@ -395,20 +363,28 @@ async def 대회시작(ctx, start: int, end: int, n: int):
     end_dt = now.replace(hour=end, minute=0, second=0, microsecond=0)
     if end <= start:
         end_dt += datetime.timedelta(days=1)
+
     contest_duration = (end_dt - start_dt).total_seconds() / 3600
     wait_time = (end_dt - now).total_seconds()
     open_wait_time = max(0, (start_dt - now).total_seconds())
     if wait_time <= 0:
         await ctx.send("이미 대회가 종료된 시간입니다.")
         return
-    bot.loop.create_task(schedule_open_channel(ctx, open_wait_time, n))
-    await ctx.send(f"⏰ **{start}시부터 {end}시까지 {contest_duration:.1f}시간동안 제 {n}회 대회를 진행합니다!**")
-    bot.loop.create_task(announce_winner(ctx, wait_time, n))
+
+    await ctx.send(
+        f"⏰ **{start}시부터 {end}시까지 {contest_duration:.1f}시간 동안 제 {n}회 대회를 진행합니다!**\n"
+        f" - 시작: {start_dt.strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f" - 종료: {end_dt.strftime('%Y-%m-%d %H:%M:%S')}"
+    )
+
+    bot.loop.create_task(schedule_open_channel(ctx, open_wait_time, n, start_dt, end_dt))
+    bot.loop.create_task(announce_winner(ctx, wait_time, n, end_dt))
 
 @bot.command()  # 자동: /대회자동 [회차]
 async def 대회자동(ctx, n: int | None = None):
+    await ctx.reply("대회 일정 동기화를 시도합니다...")
     guild = ctx.guild or bot.get_guild(DISCORD_SERVER_ID)
-    await schedule_from_api(guild, n or DEFAULT_ROUND, ctx.channel.id, silent=False)
+    await schedule_from_api(guild, n or DEFAULT_ROUND, ctx.channel.id)
 
 @bot.command()
 async def 우승자(ctx):
