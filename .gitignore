@@ -23,6 +23,9 @@ build/
 # 티켓 로그 폴더
 ticket_logs/
 
+# 티켓봇 기본 설정
+정유찬 - 티켓봇/ticket_config.json
+
 # 환경 변수 파일
 .env
 .env.*
