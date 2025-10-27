@@ -1,0 +1,12 @@
+services:
+  alert-bot:
+    build: .
+    environment:
+      API_KEY: ${API_KEY}                    # 백엔드와 동일
+      DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL}
+      PORT: "8088"
+      HTTP_TIMEOUT: "5"
+      # MENTION_ROLE_ID: "123456789012345678"  # 선택
+    ports:
+      - "8088:8088"  # 내부망만이면 빼도 됨
+    restart: unless-stopped
