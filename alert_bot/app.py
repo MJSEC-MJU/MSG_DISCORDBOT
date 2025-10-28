@@ -1,5 +1,5 @@
 # app.py
-import os, json, gzip, base64
+import os, json, gzip, base64, re, ipaddress
 import uvicorn
 from fastapi import FastAPI, Header, HTTPException, Request
 from typing import Optional, Any, Dict
@@ -7,19 +7,29 @@ import httpx
 from datetime import datetime, timezone
 from urllib.parse import parse_qs
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Env
+# ─────────────────────────────────────────────────────────────────────────────
 API_KEY = os.getenv("API_KEY", "").strip()
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
 TIMEOUT = int(os.getenv("HTTP_TIMEOUT", "5"))
 MENTION_ROLE_ID = os.getenv("MENTION_ROLE_ID", "").strip()
-DEBUG_LOGS = os.getenv("DEBUG_LOGS", "false").lower() in ("1","true","yes","y")
+DEBUG_LOGS = os.getenv("DEBUG_LOGS", "false").lower() in ("1", "true", "yes", "y")
+
+# IP 마스킹: A|B|C|NONE|LAST2 (기본 LAST2 = XXX.XXX.C.D)
+IP_MASK_MODE  = os.getenv("IP_MASK_MODE", "LAST2").strip().upper()
+IP_MASK_TOKEN = os.getenv("IP_MASK_TOKEN", "XXX").strip()
 
 if not API_KEY:
     raise RuntimeError("API_KEY env required")
 if not DISCORD_WEBHOOK_URL:
     raise RuntimeError("DISCORD_WEBHOOK_URL env required")
 
-app = FastAPI(title="MSG Alert Bot", version="1.4.0")
+app = FastAPI(title="MSG Alert Bot", version="1.6.0")
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Helpers: auth key / ISO time / body parsing
+# ─────────────────────────────────────────────────────────────────────────────
 def extract_api_key(x_api_key: Optional[str], authorization: Optional[str]) -> str:
     if x_api_key and x_api_key.strip():
         return x_api_key.strip()
@@ -41,7 +51,8 @@ def iso(v: Any) -> str:
     if isinstance(v, (int, float)):
         try:
             ts = float(v)
-            if ts > 1e12: ts /= 1000.0
+            if ts > 1e12:  # ms → s
+                ts /= 1000.0
             return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
         except Exception:
             return str(v)
@@ -54,9 +65,10 @@ def iso(v: Any) -> str:
     if isinstance(v, dict):
         try:
             y, mo, d = v.get("year"), v.get("month"), v.get("day")
-            hh, mm, ss = v.get("hour",0), v.get("minute",0), v.get("second",0)
+            hh, mm, ss = v.get("hour", 0), v.get("minute", 0), v.get("second", 0)
             if y and mo and d:
-                return datetime(int(y), int(mo), int(d), int(hh), int(mm), int(ss), tzinfo=timezone.utc).isoformat()
+                return datetime(int(y), int(mo), int(d), int(hh), int(mm), int(ss),
+                                tzinfo=timezone.utc).isoformat()
         except Exception:
             pass
         return json.dumps(v, ensure_ascii=False)
@@ -70,7 +82,7 @@ def pick(d: Dict[str, Any], *names, default=None):
 
 async def read_raw(request: Request) -> bytes:
     raw = await request.body()
-    enc = request.headers.get("content-encoding","").lower()
+    enc = request.headers.get("content-encoding", "").lower()
     if enc == "gzip" and raw:
         try:
             raw = gzip.decompress(raw)
@@ -81,7 +93,7 @@ async def read_raw(request: Request) -> bytes:
 def parse_body(raw: bytes, ctype: str) -> Dict[str, Any]:
     if not raw:
         return {}
-    # JSON 먼저
+    # JSON
     try:
         return json.loads(raw.decode("utf-8"))
     except Exception:
@@ -94,6 +106,59 @@ def parse_body(raw: bytes, ctype: str) -> Dict[str, Any]:
         pass
     return {}
 
+# ─────────────────────────────────────────────────────────────────────────────
+# IP masking
+# ─────────────────────────────────────────────────────────────────────────────
+_IPV4_RE = re.compile(r"^\s*\d{1,3}(?:\.\d{1,3}){3}\s*$")
+
+def _mask_ipv4(ip: str, mode: str, token: str) -> str:
+    parts = ip.split(".")
+    if len(parts) != 4:
+        return ip
+    a, b, c, d = parts
+    if mode == "NONE":
+        return ip
+    if mode == "A":
+        return f"{a}.{token}.{token}.{token}"
+    if mode == "B":
+        return f"{a}.{b}.{token}.{token}"
+    if mode == "C":
+        return f"{a}.{b}.{c}.{token}"
+    if mode == "LAST2":
+        # XXX.XXX.C.D
+        return f"{token}.{token}.{c}.{d}"
+    # default(B)
+    return f"{a}.{b}.{token}.{token}"
+
+def _mask_ipv6(ip: str, mode: str, token: str) -> str:
+    try:
+        addr = ipaddress.ip_address(ip)
+        # IPv4-mapped IPv6 (::ffff:a.b.c.d)
+        if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped:
+            return _mask_ipv4(str(addr.ipv4_mapped), mode, token)
+        hextets = addr.exploded.split(":")  # 8 hextets
+    except Exception:
+        return ip
+    if mode == "NONE":
+        return ip
+    if mode == "LAST2":
+        return ":".join([token]*6 + hextets[-2:])
+    keep = {"A": 1, "B": 2, "C": 3}.get(mode, 2)
+    return ":".join(hextets[:keep] + [token]*(8-keep))
+
+def mask_ip_text(ip_raw: Optional[str], mode: str = IP_MASK_MODE, token: str = IP_MASK_TOKEN) -> str:
+    if not ip_raw:
+        return "-"
+    ip = ip_raw.split(",")[0].strip()  # X-Forwarded-For 첫 IP 우선
+    if _IPV4_RE.match(ip):
+        return _mask_ipv4(ip, mode, token)
+    if ":" in ip:
+        return _mask_ipv6(ip, mode, token)
+    return ip
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Endpoints
+# ─────────────────────────────────────────────────────────────────────────────
 @app.get("/healthz")
 async def health():
     return {"ok": True}
@@ -108,40 +173,40 @@ async def alert_ban(
     if key != API_KEY:
         raise HTTPException(status_code=401, detail="invalid api key")
 
-    # ── 로깅 ─────────────────────────────────────
+    # logging
     headers_for_log = {k.lower(): v for k, v in request.headers.items()}
     raw = await read_raw(request)
-    ctype = headers_for_log.get("content-type","")
-    clen  = headers_for_log.get("content-length","")
+    ctype = headers_for_log.get("content-type", "")
+    clen  = headers_for_log.get("content-length", "")
     if DEBUG_LOGS:
         print(f"[ALERT] method=POST path=/alert/ban ctype='{ctype}' clen='{clen}'")
         head_sample = {k: headers_for_log[k] for k in ["content-type","content-encoding","expect","connection","user-agent"] if k in headers_for_log}
         print("[ALERT] hdrs:", head_sample)
-        # raw 미리보기(UTF-8) + 바이너리 안전(베이스64) 둘 다
         try:
             print("[ALERT] raw(utf8):", raw.decode("utf-8"))
         except Exception:
             print("[ALERT] raw(b64):", base64.b64encode(raw[:1024]).decode())
 
-    # ── 파싱 ─────────────────────────────────────
+    # parse
     data = parse_body(raw, ctype)
-    # 쿼리스트링 폴백(혹시 프록시가 바디를 떨궜을 때)
     if not data:
         qs = dict(request.query_params)
         if qs:
             data = qs
 
-    # 키 매핑(여러 포맷 대응)
-    ip = pick(data, "ipAddress","ip","ip_address")
-    ban_type = pick(data, "banType","ban_type", default="TEMPORARY")
+    # mapping
+    ip = pick(data, "ipAddress", "ip", "ip_address")
+    ban_type = pick(data, "banType", "ban_type", default="TEMPORARY")
     reason = pick(data, "reason", default="-")
-    banned_at = pick(data, "bannedAt","banned_at","time")
-    expires_at = pick(data, "expiresAt","expires_at")
-    by = pick(data, "bannedByAdminLoginId","by","admin", default="AUTO_BAN_SYSTEM")
-    duration = pick(data, "durationMinutes","duration_minutes")
+    banned_at = pick(data, "bannedAt", "banned_at", "time")
+    expires_at = pick(data, "expiresAt", "expires_at")
+    by = pick(data, "bannedByAdminLoginId", "by", "admin", default="AUTO_BAN_SYSTEM")
+    duration = pick(data, "durationMinutes", "duration_minutes")
+
+    ip_display = mask_ip_text(ip, IP_MASK_MODE, IP_MASK_TOKEN)
 
     fields = [
-        {"name": "IP", "value": f"`{ip or '-'}`", "inline": True},
+        {"name": "IP", "value": f"`{ip_display}`", "inline": True},
         {"name": "타입", "value": str(ban_type), "inline": True},
         {"name": "사유", "value": str(reason or "-"), "inline": False},
         {"name": "차단시각", "value": iso(banned_at), "inline": True},
@@ -150,7 +215,6 @@ async def alert_ban(
         {"name": "기간(분)", "value": str(duration) if duration is not None else "-", "inline": True},
     ]
 
-    # 파싱 실패시 원문 RAW까지 디코에 첨부(디버깅용)
     if not ip:
         preview = ""
         try:
@@ -178,4 +242,4 @@ async def alert_ban(
     return {"ok": True}
 
 if __name__ == "__main__":
-    uvicorn.run("app:app", host="0.0.0.0", port=int(os.getenv("PORT","8088")))
+    uvicorn.run("app:app", host="0.0.0.0", port=int(os.getenv("PORT", "8088")))
